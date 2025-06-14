@@ -8,23 +8,82 @@ from torchvision import transforms
 from PIL import Image
 import os
 
+# Set page config
+st.set_page_config(
+    page_title="Disease Forecaster App",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-loaded_model = joblib.load('modelweights/gaussian_nb_model.pkl')
-scaler = joblib.load('modelweights/gaussian_nb_scaler.pkl')
+# Custom CSS for better visibility
+st.markdown("""
+    <style>
+    .main {
+        padding: 2rem;
+    }
+    .stButton>button {
+        width: 100%;
+    }
+    .prediction-box {
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
+        border: 2px solid #4CAF50;
+        margin: 10px 0;
+    }
+    .prediction-text {
+        color: #1E3A8A;
+        font-size: 1.2em;
+        font-weight: bold;
+    }
+    .probability-text {
+        color: #2563EB;
+        font-size: 1.1em;
+    }
+    .warning-box {
+        background-color: #FEF2F2;
+        padding: 15px;
+        border-radius: 8px;
+        border: 2px solid #DC2626;
+        margin: 10px 0;
+    }
+    .warning-text {
+        color: #991B1B;
+        font-size: 1.1em;
+    }
+    .stProgress > div > div > div {
+        background-color: #4CAF50;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-feature_order = ['Age', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR', 'Oldpeak',
-                 'Sex_F', 'Sex_M', 'ChestPainType_ASY', 'ChestPainType_ATA', 'ChestPainType_NAP','ChestPainType_TA',
-                 'RestingECG_LVH', 'RestingECG_Normal', 'RestingECG_ST',
-                 'ExerciseAngina_N', 'ExerciseAngina_Y',
-                 'ST_Slope_Down', 'ST_Slope_Flat', 'ST_Slope_Up']
+# Load models
+@st.cache_resource
+def load_models():
+    model_dir = os.path.join(os.path.dirname(__file__), 'modelweights')
+    heart_model = joblib.load(os.path.join(model_dir, 'gaussian_nb_model.pkl'))
+    heart_scaler = joblib.load(os.path.join(model_dir, 'gaussian_nb_scaler.pkl'))
+    return heart_model, heart_scaler
 
-class_labels = {
+# Constants
+FEATURE_ORDER = ['Age', 'RestingBP', 'Cholesterol', 'FastingBS', 'MaxHR', 'Oldpeak',
+                 'Sex_F', 'Sex_M', 'ChestPainType_ASY', 'ChestPainType_ATA', 
+                 'ChestPainType_NAP', 'ChestPainType_TA', 'RestingECG_LVH', 
+                 'RestingECG_Normal', 'RestingECG_ST', 'ExerciseAngina_N', 
+                 'ExerciseAngina_Y', 'ST_Slope_Down', 'ST_Slope_Flat', 'ST_Slope_Up']
+
+CLASS_LABELS = {
     0: "Meningioma Tumor",
     1: "Normal (No Tumor)",
     2: "Glioma Tumor",
-    3: "Pituitary Tumor"
+    3: "Pituitary Tumor",
+    4: "Other"
 }
 
+CONFIDENCE_THRESHOLD = 0.7
+
+# Model class definition
 class Model(nn.Module):
     def __init__(self, num_classes):
         super(Model, self).__init__()
@@ -59,44 +118,124 @@ class Model(nn.Module):
         return x
 
 @st.cache_data
-def load_model(model_path, num_classes):
+def load_brain_model(model_path, num_classes):
     model = Model(num_classes=num_classes)
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     model.eval()
     return model
 
 def preprocess_image(image):
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
+    try:
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        target_size = (224, 224)
+        image.thumbnail((max(target_size), max(target_size)), Image.Resampling.LANCZOS)
+        
+        new_image = Image.new('RGB', target_size, (0, 0, 0))
+        new_image.paste(image, ((target_size[0] - image.size[0]) // 2,
+                              (target_size[1] - image.size[1]) // 2))
+        
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        return transform(new_image).unsqueeze(0)
+    except Exception as e:
+        st.error(f"Error preprocessing image: {str(e)}")
+        return None
 
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)), 
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    return transform(image).unsqueeze(0)
+def get_prediction_with_confidence(model, input_tensor):
+    with torch.no_grad():
+        output = model(input_tensor)
+        probabilities = torch.softmax(output, dim=1)[0]
+        prediction = torch.argmax(probabilities).item()
+        confidence = probabilities[prediction].item()
+        
+        top3_prob, top3_indices = torch.topk(probabilities, 3)
+        
+        return prediction, confidence, probabilities, top3_prob, top3_indices
 
 def main():
-    st.title('Disease Forecaster App')
-
+    st.title('🏥 Disease Forecaster App')
+    st.markdown("""
+    Welcome to the Disease Forecaster App! This application helps you predict:
+    - Heart Disease Risk
+    - Brain Tumor Classification from MRI Images
     
-    app_mode = st.sidebar.selectbox("Select Mode", ["Heart Disease Prediction", "Brain Tumor Detection"])
+    Select a mode from the sidebar to get started.
+    """)
+
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    app_mode = st.sidebar.radio(
+        "Select Mode",
+        ["Heart Disease Prediction", "Brain Tumor Detection"],
+        help="Choose between heart disease risk prediction or brain tumor classification"
+    )
 
     if app_mode == "Heart Disease Prediction":
-        st.header('Heart Disease Prediction')
+        st.header('❤️ Heart Disease Risk Prediction')
+        st.markdown("""
+        This tool helps predict the risk of heart disease based on various health parameters.
+        Please fill in your details below.
+        """)
 
-        age = st.slider('Age', 10, 80, 40)
-        sex = st.radio('Sex', ['Male', 'Female'])
-        chest_pain_type = st.selectbox('Chest Pain Type', ['Atypical Angina', 'Non-Anginal Pain', 'Asymptomatic','Typical Angina'])
-        resting_bp = st.slider('Resting BP', 90, 200, 140)
-        cholesterol = st.slider('Cholesterol', 100, 400, 289)
-        fasting_bs = st.selectbox('Fasting Blood Sugar', ['< 120 mg/dl', '> 120 mg/dl'])
-        resting_ecg = st.selectbox('Resting ECG', ['Normal', 'ST-T wave abnormality', 'Left ventricular hypertrophy'])
-        max_hr = st.slider('Max Heart Rate', 70, 210, 172)
-        exercise_angina = st.selectbox('Exercise Induced Angina', ['No', 'Yes'])
-        oldpeak = st.slider('Oldpeak', 0.0, 6.0, 0.0)
-        st_slope = st.selectbox('ST Slope', ['Upsloping', 'Flat', 'Downsloping'])
+        # Create two columns for input fields
+        col1, col2 = st.columns(2)
 
+        with col1:
+            st.subheader("Personal Information")
+            age = st.slider('Age', 10, 80, 40, 
+                          help="Enter your age in years")
+            sex = st.radio('Sex', ['Male', 'Female'],
+                         help="Select your biological sex")
+            chest_pain_type = st.selectbox(
+                'Chest Pain Type',
+                ['Atypical Angina', 'Non-Anginal Pain', 'Asymptomatic', 'Typical Angina'],
+                help="Select the type of chest pain you experience"
+            )
+
+        with col2:
+            st.subheader("Medical Measurements")
+            resting_bp = st.slider('Resting Blood Pressure (mm Hg)', 90, 200, 140,
+                                 help="Your resting blood pressure in mm Hg")
+            cholesterol = st.slider('Cholesterol (mg/dl)', 100, 400, 289,
+                                  help="Your cholesterol level in mg/dl")
+            fasting_bs = st.selectbox('Fasting Blood Sugar',
+                                    ['< 120 mg/dl', '> 120 mg/dl'],
+                                    help="Your fasting blood sugar level")
+
+        # Second row of inputs
+        col3, col4 = st.columns(2)
+
+        with col3:
+            st.subheader("Additional Measurements")
+            resting_ecg = st.selectbox(
+                'Resting ECG Results',
+                ['Normal', 'ST-T wave abnormality', 'Left ventricular hypertrophy'],
+                help="Results from your resting ECG test"
+            )
+            max_hr = st.slider('Maximum Heart Rate', 70, 210, 172,
+                             help="Your maximum heart rate achieved during exercise")
+            exercise_angina = st.selectbox(
+                'Exercise Induced Angina',
+                ['No', 'Yes'],
+                help="Whether you experience angina during exercise"
+            )
+
+        with col4:
+            st.subheader("Additional Parameters")
+            oldpeak = st.slider('ST Depression (Oldpeak)', 0.0, 6.0, 0.0,
+                              help="ST depression induced by exercise relative to rest")
+            st_slope = st.selectbox(
+                'ST Slope',
+                ['Upsloping', 'Flat', 'Downsloping'],
+                help="The slope of the peak exercise ST segment"
+            )
+
+        # Convert inputs to model format
         user_input = {
             'Age': age,
             'RestingBP': resting_bp,
@@ -104,7 +243,7 @@ def main():
             'FastingBS': 1 if fasting_bs == '> 120 mg/dl' else 0,
             'MaxHR': max_hr,
             'Oldpeak': oldpeak,
-            'Sex_F': 1 if sex == 'Female' else 0,  
+            'Sex_F': 1 if sex == 'Female' else 0,
             'Sex_M': 1 if sex == 'Male' else 0,
             'ChestPainType_ASY': 1 if chest_pain_type == 'Asymptomatic' else 0,
             'ChestPainType_ATA': 1 if chest_pain_type == 'Typical Angina' else 0,
@@ -120,52 +259,104 @@ def main():
             'ST_Slope_Up': 1 if st_slope == 'Upsloping' else 0
         }
 
-        input_features = [user_input[feature] for feature in feature_order]
-        input_features_array = np.array(input_features).reshape(1, -1)
-        input_features_scaled = scaler.transform(input_features_array)
+        # Make prediction
+        if st.button('Predict Heart Disease Risk', type='primary'):
+            try:
+                heart_model, heart_scaler = load_models()
+                input_features = [user_input[feature] for feature in FEATURE_ORDER]
+                input_features_array = np.array(input_features).reshape(1, -1)
+                input_features_scaled = heart_scaler.transform(input_features_array)
+                prediction = heart_model.predict(input_features_scaled)[0]
+                prediction_proba = heart_model.predict_proba(input_features_scaled)[0]
 
-        prediction = loaded_model.predict(input_features_scaled)[0]
+                # Display results
+                st.markdown("### Prediction Results")
+                result_col1, result_col2 = st.columns(2)
+                
+                with result_col1:
+                    st.markdown('<div class="prediction-box">', unsafe_allow_html=True)
+                    st.markdown(f'<p class="prediction-text">Prediction: {"High Risk of Heart Disease" if prediction == 1 else "Low Risk of Heart Disease"}</p>', unsafe_allow_html=True)
+                    
+                    if prediction == 1:
+                        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                        st.markdown('<p class="warning-text">⚠️ Based on the provided information, there is a high risk of heart disease. Please consult with a healthcare professional for proper evaluation.</p>', unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                        st.markdown('<p class="warning-text">✅ Based on the provided information, there is a low risk of heart disease. However, please maintain regular check-ups with your healthcare provider.</p>', unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
 
-        st.subheader('Prediction Result')
-        st.write(f'Predicted Heart Disease Status: {prediction}')
+                with result_col2:
+                    st.markdown("### Risk Probability")
+                    risk_prob = prediction_proba[1] * 100
+                    st.progress(float(risk_prob/100))
+                    st.write(f"Probability of Heart Disease: {risk_prob:.1f}%")
+
+            except Exception as e:
+                st.error(f"Error making prediction: {str(e)}")
 
     elif app_mode == "Brain Tumor Detection":
-        st.header('Brain Tumor Classification')
+        st.header('🧠 Brain Tumor Classification')
+        st.markdown("""
+        This tool helps classify brain tumors from MRI images. Upload a clear MRI image to get started.
+        """)
 
-        
+        # Sidebar for image upload
         st.sidebar.title("Upload MRI Image")
-        st.sidebar.write("Upload an MRI image and get the classification result.")
+        st.sidebar.markdown("""
+        ### Instructions
+        1. Upload a clear MRI image (JPG, JPEG, or PNG)
+        2. Image should be of a brain MRI scan
+        3. For best results, use a well-lit, clear image
+        """)
 
-        model_path = "modelweights/newmodel_30.pth"  
+        uploaded_file = st.sidebar.file_uploader(
+            "Choose an image...",
+            type=["jpg", "jpeg", "png"],
+            help="Upload a brain MRI image for classification"
+        )
+
+        model_path = os.path.join(os.path.dirname(__file__), "modelweights", "newmodel_30.pth")
 
         if os.path.isfile(model_path):
-            model = load_model(model_path, num_classes=5)
+            model = load_brain_model(model_path, num_classes=5)
             
-            uploaded_file = st.sidebar.file_uploader("Choose an image...", type="jpg")
-
             if uploaded_file is not None:
-                image = Image.open(uploaded_file)
-                st.image(image, caption='Uploaded Image')
-                
-                input_tensor = preprocess_image(image)
-                
-                with st.spinner('Making prediction...'):
-                    with torch.no_grad():
-                        output = model(input_tensor)
-                        prediction = torch.argmax(output, dim=1).item()
-                        predicted_class = class_labels.get(prediction, "Unknown")
-                        confidence = torch.softmax(output, dim=1)[0] * 100
-                
-                st.subheader('Prediction Result')
-                st.write(f'Predicted Class: **{predicted_class}**')
-                st.write(f'Confidence: **{confidence[prediction]:.2f}%**')
+                try:
+                    # Load and display image
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption='Uploaded MRI', use_container_width=True)
+                    
+                    # Preprocess and predict
+                    input_tensor = preprocess_image(image)
+                    if input_tensor is not None:
+                        with st.spinner('Analyzing image...'):
+                            prediction, confidence, probabilities, top3_prob, top3_indices = get_prediction_with_confidence(model, input_tensor)
+                            predicted_class = CLASS_LABELS.get(prediction, "Unknown")
+                            
+                            # Display results
+                            st.markdown("### Classification Results")
+                            result_col1, result_col2 = st.columns(2)
+                            
+                            with result_col1:
+                                st.markdown('<div class="prediction-box">', unsafe_allow_html=True)
+                                st.markdown(f'<p class="prediction-text">Predicted Class: {predicted_class}</p>', unsafe_allow_html=True)
+                                
+                                if confidence < CONFIDENCE_THRESHOLD:
+                                    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                                    st.markdown('<p class="warning-text">⚠️ Low confidence prediction. Please consult a medical professional.</p>', unsafe_allow_html=True)
+                                    st.markdown('</div>', unsafe_allow_html=True)
 
-                st.subheader('Class Probabilities')
-                for i, label in class_labels.items():
-                    st.write(f'{label}: {confidence[i]:.2f}%')
+                            with result_col2:
+                                st.markdown("### Top 3 Predictions")
+                                for prob, idx in zip(top3_prob, top3_indices):
+                                    st.write(f"- {CLASS_LABELS[idx.item()]}: {prob.item()*100:.1f}%")
+                                    st.progress(float(prob.item()))
 
+                except Exception as e:
+                    st.error(f"Error processing image: {str(e)}")
         else:
-            st.sidebar.write("Please enter a valid model weights file path.")
+            st.error("Model file not found. Please ensure the model weights file exists.")
 
 if __name__ == '__main__':
     main()

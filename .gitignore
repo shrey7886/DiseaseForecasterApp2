@@ -1,0 +1,20 @@
+# Virtual Environment
+venv/
+venv_new/
+__pycache__/
+*.pyc
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Environment variables
+.env
+
+# Model files (if they're large)
+*.pkl
+*.h5
+*.pth
+
+# Logs
+*.log 
